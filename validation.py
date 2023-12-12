@@ -5,7 +5,6 @@ import tempfile
 from scipy import ndimage
 from scipy.ndimage import label
 from functools import partial
-from surface_distance import compute_surface_distances,compute_surface_dice_at_tolerance
 import monai
 from monai.inferers import sliding_window_inference
 from monai.data import load_decathlon_datalist
@@ -67,13 +66,6 @@ def cal_dice(pred, true):
     dice = intersection / (np.sum(pred) + np.sum(true))
     return dice
 
-def cal_dice_nsd(pred, truth, spacing_mm=(1,1,1), tolerance=2):
-    dice = cal_dice(pred, truth)
-    # cal nsd
-    surface_distances = compute_surface_distances(truth.astype(bool), pred.astype(bool), spacing_mm=spacing_mm)
-    nsd = compute_surface_dice_at_tolerance(surface_distances, tolerance)
-
-    return (dice, nsd)
 
 
 def _get_model(val_dir, json_dir, save_dir, log_dir, checkpoint, feature_size, val_overlap, num_classes, model, swin_type):
