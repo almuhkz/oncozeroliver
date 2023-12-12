@@ -1,0 +1,25 @@
+{
+    "description": "LiTS",
+    "labels": {
+        "0": "background",
+        "1": "liver",
+        "2": "tumor"
+    },
+    "licence": "yt",
+    "modality": {
+        "0": "CT"
+    },
+    "name": "lits",
+    "numTraining": 0,
+    "numValid": 1,
+    "reference": "xxxx",
+    "release": "2022/08/27",
+    "tensorImageSize": "3D",
+    "training": [],
+    "validation": [
+        {
+            "image": "temp.nii.gz",
+            "label": "temp_label.nii.gz"
+        }
+    ]
+}
