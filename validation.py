@@ -1,7 +1,7 @@
-import os, time, csv
+import os, time
 import numpy as np
-import torch
-from sklearn.metrics import confusion_matrix
+import streamlit as st
+import tempfile
 from scipy import ndimage
 from scipy.ndimage import label
 from functools import partial
@@ -13,6 +13,7 @@ from monai.transforms import AsDiscrete,AsDiscreted,Compose,Invertd,SaveImaged
 from monai import transforms, data
 from networks.swin3d_unetrv2 import SwinUNETR as SwinUNETR_v2
 import nibabel as nib
+import torch
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -75,15 +76,15 @@ def cal_dice_nsd(pred, truth, spacing_mm=(1,1,1), tolerance=2):
     return (dice, nsd)
 
 
-def _get_model(args):
+def _get_model(val_dir, json_dir, save_dir, log_dir, checkpoint, feature_size, val_overlap, num_classes, model, swin_type):
     inf_size = [96, 96, 96]
-    print(args.model)
-    if args.model == 'swin_unetrv2':
-        if args.swin_type == 'tiny':
+    print(model)
+    if model == 'swin_unetrv2':
+        if swin_type == 'tiny':
             feature_size=12
-        elif args.swin_type == 'small':
+        elif swin_type == 'small':
             feature_size=24
-        elif args.swin_type == 'base':
+        elif swin_type == 'base':
             feature_size=48
 
         model = SwinUNETR_v2(in_channels=1,
@@ -95,7 +96,7 @@ def _get_model(args):
                           num_heads=[3, 6, 12, 24],
                           window_size=[7, 7, 7])
         
-    elif args.model == 'unet':
+    elif model == 'unet':
         from monai.networks.nets import UNet 
         model = UNet(
                     spatial_dims=3,
@@ -107,11 +108,11 @@ def _get_model(args):
                 )
     
     else:
-        raise ValueError('Unsupported model ' + str(args.model))
+        raise ValueError('Unsupported model ' + str(model))
 
 
-    if args.checkpoint:
-        checkpoint = torch.load(os.path.join(args.log_dir, 'model.pt'), map_location='cpu')
+    if checkpoint:
+        checkpoint = torch.load(os.path.join(log_dir, 'model.pt'), map_location='cpu')
 
         from collections import OrderedDict
         new_state_dict = OrderedDict()
@@ -121,30 +122,30 @@ def _get_model(args):
         model.load_state_dict(new_state_dict, strict=False)
         print('Use logdir weights')
     else:
-        model_dict = torch.load(os.path.join(args.log_dir, 'model.pt'))
+        model_dict = torch.load(os.path.join(log_dir, 'model.pt'))
         model.load_state_dict(model_dict['state_dict'])
         print('Use logdir weights')
 
     model = model.cuda()
-    model_inferer = partial(sliding_window_inference, roi_size=inf_size, sw_batch_size=1, predictor=model,  overlap=args.val_overlap, mode='gaussian')
+    model_inferer = partial(sliding_window_inference, roi_size=inf_size, sw_batch_size=1, predictor=model,  overlap=val_overlap, mode='gaussian')
     pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('Total parameters count', pytorch_total_params)
 
     return model, model_inferer
 
-def _get_loader(args):
-    val_data_dir = args.val_dir
-    datalist_json = args.json_dir 
+def _get_loader(val_dir, json_dir):
+    val_data_dir = val_dir
+    datalist_json = json_dir 
     val_org_transform = transforms.Compose(
-        [
-            transforms.LoadImaged(keys=["image", "label"]),
-            transforms.AddChanneld(keys=["image", "label"]),
-            transforms.Orientationd(keys=["image"], axcodes="RAS"),
-            transforms.Spacingd(keys=["image"], pixdim=(1.0, 1.0, 1.0), mode=("bilinear")),
-            transforms.ScaleIntensityRanged(keys=["image"], a_min=-21, a_max=189, b_min=0.0, b_max=1.0, clip=True),
-            transforms.SpatialPadd(keys=["image"], mode="minimum", spatial_size=[96, 96, 96]),
-            transforms.ToTensord(keys=["image", "label"]),
-        ]
+    [
+        transforms.LoadImaged(keys=["image"]),
+        transforms.AddChanneld(keys=["image"]),
+        transforms.Orientationd(keys=["image"], axcodes="RAS"),
+        transforms.Spacingd(keys=["image"], pixdim=(1.0, 1.0, 1.0), mode=("bilinear")),
+        transforms.ScaleIntensityRanged(keys=["image"], a_min=-21, a_max=189, b_min=0.0, b_max=1.0, clip=True),
+        transforms.SpatialPadd(keys=["image"], mode="minimum", spatial_size=[96, 96, 96]),
+        transforms.ToTensord(keys=["image"]),
+    ]
     )
     val_files = load_decathlon_datalist(datalist_json, True, "validation", base_dir=val_data_dir)
     val_org_ds = data.Dataset(val_files, transform=val_org_transform)
@@ -169,70 +170,54 @@ def _get_loader(args):
     
     return val_org_loader, post_transforms
 
-def main():
-    args = parser.parse_args()
-    model_name = args.log_dir.split('/')[-1]
-    args.model_name = model_name
+def main(val_dir, json_dir, save_dir, log_dir, checkpoint, feature_size, val_overlap, num_classes, model, swin_type):
+    model_name = log_dir.split('/')[-1]
+
     print("MAIN Argument values:")
-    for k, v in vars(args).items():
-        print(k, '=>', v)
+    print('val_dir =>', val_dir)
+    print('json_dir =>', json_dir)
+    print('save_dir =>', save_dir)
+    print('log_dir =>', log_dir)
+    print('checkpoint =>', checkpoint)
+    print('feature_size =>', feature_size)
+    print('val_overlap =>', val_overlap)
+    print('num_classes =>', num_classes)
+    print('model =>', model)
+    print('swin_type =>', swin_type)
     print('-----------------')
 
     torch.cuda.set_device(0) #use this default device (same as args.device if not distributed)
     torch.backends.cudnn.benchmark = True
 
     ## loader and post_transform
-    val_loader, post_transforms = _get_loader(args)
+    val_loader, post_transforms = _get_loader(val_dir, json_dir)
 
     ## NETWORK
-    model, model_inferer = _get_model(args)
-
-    liver_dice = []
-    liver_nsd  = []
-    tumor_dice = []
-    tumor_nsd  = []
-    header = ['name', 'liver_dice', 'liver_nsd', 'tumor_dice', 'tumor_nsd']
-    rows = []
+    model, model_inferer = _get_model(val_dir, json_dir, save_dir, log_dir, checkpoint, feature_size, val_overlap, num_classes, model, swin_type)
 
     model.eval()
     start_time = time.time()
     with torch.no_grad():
         for idx, val_data in enumerate(val_loader):
             val_inputs = val_data["image"].cuda()
-            name = val_data['label_meta_dict']['filename_or_obj'][0].split('/')[-1].split('.')[0]
-            original_affine = val_data["label_meta_dict"]["affine"][0].numpy()
-            pixdim = val_data['label_meta_dict']['pixdim'].cpu().numpy()
-            spacing_mm = tuple(pixdim[0][1:4])
+            # name = val_data['label_meta_dict']['filename_or_obj'][0].split('/')[-1].split('.')[0]
+            # original_affine = val_data["label_meta_dict"]["affine"][0].numpy()
+            # pixdim = val_data['label_meta_dict']['pixdim'].cpu().numpy()
+            # spacing_mm = tuple(pixdim[0][1:4])
 
             val_data["pred"] = model_inferer(val_inputs)
             val_data = [post_transforms(i) for i in data.decollate_batch(val_data)]
             # val_outputs, val_labels = from_engine(["pred", "label"])(val_data)
-            val_outputs, val_labels = val_data[0]['pred'], val_data[0]['label'] 
+            val_outputs = val_data[0]['pred']
             
             # val_outpus.shape == val_labels.shape  (3, H, W, Z)
-            val_outputs, val_labels = val_outputs.detach().cpu().numpy(), val_labels.detach().cpu().numpy()
+            val_outputs = val_outputs.detach().cpu().numpy()
 
             # denoise the ouputs 
             val_outputs = denoise_pred(val_outputs)
 
-            current_liver_dice, current_liver_nsd = cal_dice_nsd(val_outputs[1,...], val_labels[1,...], spacing_mm=spacing_mm)
-            current_tumor_dice, current_tumor_nsd = cal_dice_nsd(val_outputs[2,...], val_labels[2,...], spacing_mm=spacing_mm)
-            
-
-            liver_dice.append(current_liver_dice)
-            liver_nsd.append(current_liver_nsd)
-            tumor_dice.append(current_tumor_dice)
-            tumor_nsd.append(current_tumor_nsd)
-
-            row = [name, current_liver_dice, current_liver_nsd, current_tumor_dice, current_tumor_nsd]
-            rows.append(row)
-
-            print(name, val_outputs[0].shape, \
-                'dice: [{:.3f}  {:.3f}]; nsd: [{:.3f}  {:.3f}]'.format(current_liver_dice, current_tumor_dice, current_liver_nsd, current_tumor_nsd), \
-                'time {:.2f}s'.format(time.time() - start_time))
-
             # save the prediction
-            output_dir = os.path.join(args.save_dir, args.model_name, str(args.val_overlap), 'pred')
+            output_dir = os.path.join(save_dir, model_name, str(val_overlap), 'pred')
             if not os.path.exists(output_dir):
                 os.makedirs(output_dir)
             val_outputs = np.argmax(val_outputs, axis=0)
@@ -241,22 +226,29 @@ def main():
                 nib.Nifti1Image(val_outputs.astype(np.uint8), original_affine), os.path.join(output_dir, f'{name}.nii.gz')
             )
 
-
-        print("liver dice:", np.mean(liver_dice))
-        print("liver nsd:", np.mean(liver_nsd))
-        print("tumor dice:", np.mean(tumor_dice))
-        print("tumor nsd",np.mean(tumor_nsd))
-
-        # save metrics to cvs file
-        csv_save = os.path.join(args.save_dir, args.model_name, str(args.val_overlap))
-        if not os.path.exists(csv_save):
-            os.makedirs(csv_save)
-        csv_name = os.path.join(csv_save, 'metrics.csv')
-        with open(csv_name, 'w', encoding='UTF8', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(header)
-            writer.writerows(rows)
-
 # save path: save_dir/log_dir_name/str(args.val_overlap)/pred/
-if __name__ == "__main__":
-    main()
+st.title("Liver CT Scan Tumor Prediction")
+uploaded_file = st.file_uploader("Upload a CT scan (.nii.gz)", type=["nii.gz"])
+
+if uploaded_file is not None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_file_path = os.path.join(temp_dir, "temp.nii.gz")
+        with open(temp_file_path, "wb") as file:
+            file.write(uploaded_file.getbuffer())
+        val_dir = os.path.dirname(temp_file_path)
+        json_dir = "datafolds/lits.json"  # Update this path as needed
+        save_dir = temp_dir  # Directory where predictions will be saved
+        log_dir = "runs/synt.pretrain.swin_unetrv2_base"  # Update this path as needed
+        main(val_dir, json_dir, save_dir, log_dir, checkpoint=False, feature_size=16, val_overlap=0.75, num_classes=3, model='swin_unetrv2', swin_type='base')
+        output_dir = os.path.join(save_dir, model_name, str(val_overlap), 'pred')
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        prediction_file = os.path.join(output_dir, "temp.nii.gz")
+        if os.path.exists(prediction_file):
+            with open(prediction_file, "rb") as file:
+                st.download_button(
+                    label="Download Prediction",
+                    data=file,
+                    file_name="prediction_result.nii.gz",
+                    mime="application/gzip"
+                )
